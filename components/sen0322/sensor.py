@@ -9,7 +9,7 @@ from esphome.const import (
 )
 
 DEPENDENCIES = ["i2c"]
-CODEOWNERS = ["@makbart1980"]  # Zmień na swoją nazwę GitHub
+CODEOWNERS = ["@makbart1980", "@SergeyZh"]  # Zmień na swoją nazwę GitHub
 
 sen0322_ns = cg.esphome_ns.namespace("sen0322")
 SEN0322Sensor = sen0322_ns.class_("SEN0322Sensor", cg.PollingComponent, i2c.I2CDevice)

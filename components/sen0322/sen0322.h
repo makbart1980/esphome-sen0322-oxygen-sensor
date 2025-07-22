@@ -15,6 +15,8 @@ class SEN0322Sensor : public PollingComponent, public i2c::I2CDevice, public sen
   float get_setup_priority() const override;
 
  protected:
+  float calibrated_value_;
+  void readFlash();
   // Additional methods can be added here if needed for advanced functionality
 };
 
