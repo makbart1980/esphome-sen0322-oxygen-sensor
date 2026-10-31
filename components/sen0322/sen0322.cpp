@@ -10,6 +10,8 @@ static const char *const TAG = "sen0322";
 
 static constexpr uint8_t OXYGEN_DATA_REGISTER = 0x03;
 static constexpr uint8_t CALIBRATION_REGISTER = 0x0A;
+static constexpr uint8_t PROBE_LIFE_REGISTER = 0x0E;
+static constexpr uint8_t VERSION_REGISTER = 0x0F;
 
 void SEN0322Sensor::setup() {
   ESP_LOGCONFIG(TAG, "Setting up SEN0322...");
@@ -20,7 +22,7 @@ void SEN0322Sensor::setup() {
 }
 
 void SEN0322Sensor::dump_config() {
-  ESP_LOGCONFIG(TAG, "SEN0322 Oxygen Sensor:");
+  ESP_LOGCONFIG(TAG, "SEN0322 Oxygen Sensor (diagnostics v1):");
   LOG_I2C_DEVICE(this);
   LOG_UPDATE_INTERVAL(this);
   LOG_SENSOR("  ", "Oxygen", this);
@@ -33,7 +35,51 @@ void SEN0322Sensor::update() {
 
   this->measurement_pending_ = true;
 
-  // Select the calibration register without writing an extra data byte.
+  // Read-only diagnostics using registers from the DFRobot library.
+  // Sending one register address selects it without changing calibration.
+  const auto read_status_register =
+      [this](uint8_t reg, uint8_t &value) -> bool {
+    if (this->write(&reg, 1) != i2c::ERROR_OK) {
+      return false;
+    }
+
+    return this->read(&value, 1) == i2c::ERROR_OK;
+  };
+
+  uint8_t version = 0;
+
+  if (read_status_register(VERSION_REGISTER, version)) {
+    ESP_LOGD(TAG, "Version register 0x0F: 0x%02X", version);
+
+    if (version == 0x01) {
+      uint8_t probe_life = 0;
+
+      if (read_status_register(PROBE_LIFE_REGISTER, probe_life)) {
+        ESP_LOGD(TAG, "Probe life register 0x0E: 0x%02X",
+                 probe_life);
+
+        if (probe_life == 0x00) {
+          ESP_LOGW(TAG, "Module reports an exhausted oxygen probe");
+        } else if (probe_life == 0x01) {
+          ESP_LOGD(TAG, "Module reports normal probe life");
+        } else {
+          ESP_LOGW(TAG, "Unrecognized probe life status");
+        }
+      } else {
+        ESP_LOGW(TAG, "Could not read probe life status");
+      }
+    } else if (version == 0xFF) {
+      ESP_LOGD(TAG, "Older module: probe life status is not supported");
+    } else {
+      ESP_LOGW(TAG,
+               "Unrecognized module version; skipping probe life check");
+    }
+  } else {
+    ESP_LOGW(TAG,
+             "Version register unavailable; continuing measurement");
+  }
+
+  // Select the calibration register without an extra data byte.
   const uint8_t reg = CALIBRATION_REGISTER;
 
   if (this->write(&reg, 1) != i2c::ERROR_OK) {
@@ -64,7 +110,7 @@ void SEN0322Sensor::read_calibration_() {
     return;
   }
 
-  // The calibration coefficient is stored as a little-endian integer.
+  // Decode the calibration coefficient as a little-endian integer.
   const uint16_t raw_calibration =
       static_cast<uint16_t>(data[0]) |
       (static_cast<uint16_t>(data[1]) << 8);
@@ -74,13 +120,16 @@ void SEN0322Sensor::read_calibration_() {
     return;
   }
 
-  // Use the fallback specified by the DFRobot library when the value is zero.
+  // Use the manufacturer's fallback when the stored value is zero.
   this->calibration_factor_ =
       raw_calibration == 0
           ? 20.9f / 120.0f
           : static_cast<float>(raw_calibration) / 1000.0f;
 
-  ESP_LOGV(TAG, "Calibration factor: %.6f",
+  ESP_LOGD(TAG,
+           "Calibration bytes: %02X %02X; raw: %u; factor: %.6f",
+           data[0], data[1],
+           static_cast<unsigned>(raw_calibration),
            this->calibration_factor_);
 
   // Select the oxygen data register.
@@ -109,7 +158,7 @@ void SEN0322Sensor::read_oxygen_() {
     return;
   }
 
-  // Decode all three bytes according to the DFRobot library.
+  // Decode the three bytes according to the DFRobot library.
   const float raw_value =
       static_cast<float>(data[0]) +
       static_cast<float>(data[1]) / 10.0f +
@@ -118,13 +167,14 @@ void SEN0322Sensor::read_oxygen_() {
   const float oxygen =
       this->calibration_factor_ * raw_value;
 
-  ESP_LOGV(TAG, "Raw data: %02X %02X %02X",
-           data[0], data[1], data[2]);
+  ESP_LOGD(TAG, "Raw data: %02X %02X %02X; raw signal: %.4f",
+           data[0], data[1], data[2], raw_value);
 
-  // Zero is a valid measurement. Do not replace low oxygen with a normal value.
+  // Preserve zero and low readings; reject invalid or unsupported values.
   if (!std::isfinite(oxygen) || oxygen < 0.0f || oxygen > 30.0f) {
-    ESP_LOGW(TAG, "Oxygen reading outside supported range: %.2f%%",
+    ESP_LOGW(TAG, "Oxygen reading outside supported range: %.4f%%",
              oxygen);
+
     this->handle_error_("Invalid oxygen reading");
     return;
   }
@@ -133,7 +183,7 @@ void SEN0322Sensor::read_oxygen_() {
   this->measurement_pending_ = false;
   this->status_clear_warning();
 
-  ESP_LOGD(TAG, "Oxygen concentration: %.2f%%", oxygen);
+  ESP_LOGD(TAG, "Oxygen concentration: %.4f%%", oxygen);
   this->publish_state(oxygen);
 }
 
@@ -147,7 +197,7 @@ void SEN0322Sensor::handle_error_(const char *message) {
   this->measurement_pending_ = false;
   this->status_set_warning();
 
-  // Mark the measurement as invalid instead of keeping an old value.
+  // Publish an invalid measurement instead of retaining an old value.
   this->publish_state(NAN);
 }
 
